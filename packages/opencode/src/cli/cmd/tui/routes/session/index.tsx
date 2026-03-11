@@ -1408,35 +1408,34 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               <Show when={duration()}>
                 <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
               </Show>
+              {(() => {
+                const cacheInfo = createMemo(() => {
+                  const stepFinish = props.parts.findLast((p: any) => p.type === "step-finish" && p.metadata?.cacheInfo)
+                  return (stepFinish as any)?.metadata?.cacheInfo
+                })
+                const cacheLabel = createMemo(() => {
+                  const info = cacheInfo()
+                  if (!info) return ""
+                  const mode = info.cache_mode?.toUpperCase().replace("_", " ") ?? "UNKNOWN"
+                  const isHit = mode.includes("HIT")
+                  const cached = info.cached_tokens ?? 0
+                  const prompt = info.total_prompt_tokens ?? 0
+                  return isHit
+                    ? `KV CACHE ${mode} — ${cached.toLocaleString()} tokens reused`
+                    : `${mode} — Prompt ${prompt.toLocaleString()} tokens`
+                })
+                return (
+                  <Show when={cacheLabel()}>
+                    <span style={{ fg: cacheLabel().includes("HIT") ? theme.success ?? theme.primary : theme.warning }}>
+                      {" · "}{cacheLabel()}
+                    </span>
+                  </Show>
+                )
+              })()}
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
               </Show>
             </text>
-            {(() => {
-              // soloheaven: show cache info from step-finish part
-              const cacheInfo = createMemo(() => {
-                const stepFinish = props.parts.findLast((p: any) => p.type === "step-finish" && p.metadata?.cacheInfo)
-                return (stepFinish as any)?.metadata?.cacheInfo
-              })
-              const cacheLabel = createMemo(() => {
-                const info = cacheInfo()
-                if (!info) return ""
-                const mode = info.cache_mode?.toUpperCase().replace("_", " ") ?? "UNKNOWN"
-                const isHit = mode.includes("HIT")
-                const cached = info.cached_tokens ?? 0
-                const prompt = info.total_prompt_tokens ?? 0
-                return isHit
-                  ? `KV CACHE ${mode} — ${cached.toLocaleString()} tokens reused`
-                  : `${mode} — Prompt ${prompt.toLocaleString()} tokens`
-              })
-              return (
-                <Show when={cacheLabel()}>
-                  <text fg={cacheLabel().includes("HIT") ? theme.success ?? theme.primary : theme.warning}>
-                    {cacheLabel()}
-                  </text>
-                </Show>
-              )
-            })()}
           </box>
         </Match>
       </Switch>
@@ -1530,23 +1529,28 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 
   const isThinkingActive = createMemo(() => {
     const text = props.part.text
-    // Still thinking if no </think> found yet and there's content
-    return text.length > 0 && !text.includes("</think>")
+    // Only active if there's thinking content (thinkContent found tags)
+    // and </think> hasn't arrived yet
+    return thinkContent() !== "" && !text.includes("</think>")
   })
 
   // Text after stripping thinking content.
-  // While thinking (no </think> yet), display nothing — thinking block handles it.
-  // After </think>, show only the response part.
+  // Models with thinking: text starts as "thinking...\n</think>\n\nresponse"
+  // Models without thinking (e.g. Coder-Next): text is just the response, no tags.
   const displayText = createMemo(() => {
     const text = props.part.text
     if (!text) return ""
     const closeIdx = text.indexOf("</think>")
-    // Still thinking — don't show anything in the text block
-    if (closeIdx === -1) return ""
-    // Thinking done — show everything after </think>
-    let response = text.slice(closeIdx + 8)
-    response = response.replace(/<\/?think>\s*/g, "")
-    return response.trim()
+    if (closeIdx !== -1) {
+      // Has </think> — show everything after it
+      let response = text.slice(closeIdx + 8)
+      response = response.replace(/<\/?think>\s*/g, "")
+      return response.trim()
+    }
+    // No </think> — check if we're in thinking mode (has content but no tag yet)
+    if (thinkContent()) return ""
+    // No thinking at all — display text as-is
+    return text.trim()
   })
 
   // Elapsed time for active thinking

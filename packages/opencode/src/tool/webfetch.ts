@@ -57,17 +57,24 @@ export const WebFetchTool = Tool.define("webfetch", {
     }
     const headers = {
       "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       Accept: acceptHeader,
       "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "gzip, deflate, br",
+      "Connection": "keep-alive",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
     }
 
     const initial = await fetch(params.url, { signal, headers })
 
-    // Retry with honest UA if blocked by Cloudflare bot detection (TLS fingerprint mismatch)
+    // Retry with different UA if blocked
     const response =
-      initial.status === 403 && initial.headers.get("cf-mitigated") === "challenge"
-        ? await fetch(params.url, { signal, headers: { ...headers, "User-Agent": "opencode" } })
+      initial.status === 403 || initial.status === 429
+        ? await fetch(params.url, { signal, headers: { ...headers, "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36" } })
         : initial
 
     clearTimeout()

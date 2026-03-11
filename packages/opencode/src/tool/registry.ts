@@ -142,7 +142,7 @@ export namespace ToolRegistry {
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
-            return model.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA
+            return model.providerID === ("mlx-soloheaven" as ProviderID) || model.providerID === ProviderID.opencode || Flag.OPENCODE_ENABLE_EXA
           }
 
           // use apply tool in same format as codex

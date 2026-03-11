@@ -722,7 +722,13 @@ export namespace SessionPrompt {
       }
       continue
     }
-    SessionCompaction.prune({ sessionID })
+    // soloheaven: skip pruning to keep message content stable for KV cache hits.
+    // Pruning replaces old tool outputs with placeholder text, which changes the
+    // message content and causes cache misses on the next request.
+    const pruneModel = await lastModel(sessionID)
+    if (pruneModel.providerID !== "mlx-soloheaven") {
+      SessionCompaction.prune({ sessionID })
+    }
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
       const queued = state()[sessionID]?.callbacks ?? []

@@ -564,6 +564,7 @@ export namespace MessageV2 {
   ): ModelMessage[] {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
+    const isSoloheaven = model.providerID === "mlx-soloheaven"
     // Track media from tool results that need to be injected as user messages
     // for providers that don't support media in tool results.
     //
@@ -619,7 +620,8 @@ export namespace MessageV2 {
     }
 
     for (const msg of input) {
-      if (msg.parts.length === 0) continue
+      // soloheaven: never skip messages to keep indices stable for KV cache
+      if (!isSoloheaven && msg.parts.length === 0) continue
 
       if (msg.info.role === "user") {
         const userMessage: UIMessage = {
@@ -670,7 +672,9 @@ export namespace MessageV2 {
         const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
         const media: Array<{ mime: string; url: string }> = []
 
+        // soloheaven: never skip error messages to keep indices stable for KV cache
         if (
+          !isSoloheaven &&
           msg.info.error &&
           !(
             MessageV2.AbortedError.isInstance(msg.info.error) &&
@@ -770,7 +774,7 @@ export namespace MessageV2 {
             })
           }
         }
-        if (assistantMessage.parts.length > 0) {
+        if (isSoloheaven || assistantMessage.parts.length > 0) {
           result.push(assistantMessage)
           // Inject pending media as a user message for providers that don't support
           // media (images, PDFs) in tool results
@@ -798,7 +802,9 @@ export namespace MessageV2 {
     const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
     return convertToModelMessages(
-      result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
+      isSoloheaven
+        ? result
+        : result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
         //@ts-expect-error (convertToModelMessages expects a ToolSet but only actually needs tools[name]?.toModelOutput)
         tools,

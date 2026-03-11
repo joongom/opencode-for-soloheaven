@@ -12,6 +12,9 @@ import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
 import { TodoItem } from "../../component/todo-item"
 import { getToolSummary } from "./index"
+import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
+import z from "zod"
 
 const ThinkingHistory = (props: { sessionID: string; sync: ReturnType<typeof useSync> }) => {
   const { theme } = useTheme()
@@ -66,7 +69,7 @@ const ThinkingHistory = (props: { sessionID: string; sync: ReturnType<typeof use
         <text fg={theme.text}>
           <b>Thinking History</b>
         </text>
-        <box flexDirection="column" gap={1} marginTop={1}>
+        <box flexDirection="column" gap={0.5}>
           <For each={completedThinkings()}>
             {(item) => {
               const isExpanded = expandedItems().has(item.message.id)
@@ -135,6 +138,77 @@ const ThinkingHistory = (props: { sessionID: string; sync: ReturnType<typeof use
         </box>
       </box>
     </Show>
+  )
+}
+
+const KVCacheEntry = z.object({
+  timestamp: z.number(),
+  cacheMode: z.string().optional(),
+  cachedTokens: z.number(),
+  newTokens: z.number(),
+  totalTokens: z.number(),
+})
+
+type KVCacheEntry = z.infer<typeof KVCacheEntry>
+
+const KVCacheLog = (props: { sessionID: string; sync: ReturnType<typeof useSync> }) => {
+  const { theme } = useTheme()
+  const [logs, setLogs] = createSignal<KVCacheEntry[]>([])
+  
+  createMemo(() => {
+    const messages = props.sync.data.message[props.sessionID] ?? []
+    const newLogs: KVCacheEntry[] = []
+    
+    for (const msg of messages) {
+      if (msg.role !== "assistant" || !msg.time.completed) continue
+      
+      const parts = props.sync.data.part[msg.id] ?? []
+      const stepFinish = parts.findLast((p: any) => p.type === "step-finish" && p.metadata?.cacheInfo)
+      
+      if (!stepFinish) continue
+      
+      const cacheInfo = stepFinish.metadata.cacheInfo
+      const cachedTokens = cacheInfo.cached_tokens ?? 0
+      const totalTokens = cacheInfo.total_prompt_tokens ?? 0
+      const newWriteTokens = totalTokens - cachedTokens
+      
+      if (cachedTokens === 0 && newWriteTokens === 0) continue
+      
+      newLogs.push({
+        cacheMode: cacheInfo.cache_mode ?? (cachedTokens > 0 ? "HIT" : "MISS"),
+        cachedTokens,
+        newTokens: newWriteTokens,
+        totalTokens,
+      })
+    }
+    
+    setLogs(newLogs.slice(-5).reverse())
+  })
+  
+  return (
+    <box>
+      <text fg={theme.text}>
+        <b>KV Cache</b>
+      </text>
+      <box flexDirection="column">
+        <Show when={logs().length > 0}>
+          <For each={logs()}>
+            {(log) => {
+              const isHit = log.cacheMode.toUpperCase().includes("HIT")
+              return (
+                <text fg={theme.textMuted}>
+                  <span style={{ fg: isHit ? theme.success : theme.warning }}>{isHit ? "HIT" : "MISS"}</span>
+                  {` ${log.cachedTokens.toLocaleString()} reused +${log.newTokens.toLocaleString()} new`}
+                </text>
+              )
+            }}
+          </For>
+        </Show>
+        <Show when={logs().length === 0}>
+          <text fg={theme.textMuted}>No cache data</text>
+        </Show>
+      </box>
+    </box>
   )
 }
 
@@ -393,6 +467,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               </box>
             </Show>
             <ThinkingHistory sessionID={props.sessionID} sync={sync} />
+            <KVCacheLog sessionID={props.sessionID} sync={sync} />
           </box>
         </scrollbox>
 
