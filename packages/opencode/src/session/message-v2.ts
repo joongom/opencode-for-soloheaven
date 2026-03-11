@@ -259,6 +259,7 @@ export namespace MessageV2 {
         write: z.number(),
       }),
     }),
+    metadata: z.record(z.string(), z.any()).optional(),
   }).meta({
     ref: "StepFinishPart",
   })
@@ -684,12 +685,26 @@ export namespace MessageV2 {
           parts: [],
         }
         for (const part of msg.parts) {
-          if (part.type === "text")
-            assistantMessage.parts.push({
-              type: "text",
-              text: part.text,
-              ...(differentModel ? {} : { providerMetadata: part.metadata }),
-            })
+          if (part.type === "text") {
+            // Strip thinking content from assistant text so it's never
+            // sent back in subsequent conversation turns.
+            // Server sends: "thinking...\n</think>\n\nresponse"
+            let text = part.text
+            // Case 1: <think>...</think> (with opening tag)
+            text = text.replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+            // Case 2: ...</think> (no opening tag — everything before </think> is thinking)
+            const closeIdx = text.indexOf("</think>")
+            if (closeIdx !== -1) text = text.slice(closeIdx + 8)
+            // Clean up stray tags
+            text = text.replace(/<\/?think>\s*/g, "")
+            if (text.trim()) {
+              assistantMessage.parts.push({
+                type: "text",
+                text: text,
+                ...(differentModel ? {} : { providerMetadata: part.metadata }),
+              })
+            }
+          }
           if (part.type === "step-start")
             assistantMessage.parts.push({
               type: "step-start",

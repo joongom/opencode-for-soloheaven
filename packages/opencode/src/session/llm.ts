@@ -56,6 +56,11 @@ export namespace LLM {
     l.info("stream", {
       modelID: input.model.id,
       providerID: input.model.providerID,
+      agent: input.agent.name,
+      sessionID: input.sessionID,
+      messageCount: input.messages.length,
+      systemCount: input.system.length,
+      small: input.small,
     })
     const [language, cfg, provider, auth] = await Promise.all([
       Provider.getLanguage(input.model),
@@ -95,11 +100,24 @@ export namespace LLM {
 
     const variant =
       !input.small && input.model.variants && input.user.variant ? input.model.variants[input.user.variant] : {}
+    // soloheaven protocol: include agent name in sessionID for per-mode KV cache isolation.
+    // - compaction: uses the original agent's session (ses_xxx:build) since the old cache
+    //   is invalidated anyway after compaction — the conversation history changes completely.
+    // - title: uses its own session (ses_xxx:title) since messages are completely different.
+    // - everything else: uses its own agent name.
+    const cacheSessionID =
+      input.model.providerID === "mlx-soloheaven"
+        ? `${input.sessionID}:${input.agent.name === "compaction" ? (input.user.agent ?? "compaction") : input.agent.name}`
+        : input.sessionID
     const base = input.small
-      ? ProviderTransform.smallOptions(input.model)
+      ? {
+          ...ProviderTransform.smallOptions(input.model),
+          // soloheaven: still pass user for session/cache tracking even on small requests
+          ...(input.model.providerID === "mlx-soloheaven" ? { user: cacheSessionID } : {}),
+        }
       : ProviderTransform.options({
           model: input.model,
-          sessionID: input.sessionID,
+          sessionID: cacheSessionID,
           providerOptions: provider.options,
         })
     const options: Record<string, any> = pipe(
@@ -145,8 +163,14 @@ export namespace LLM {
       },
     )
 
-    const maxOutputTokens =
+    let maxOutputTokens =
       isCodex || provider.id.includes("github-copilot") ? undefined : ProviderTransform.maxOutputTokens(input.model)
+
+    // soloheaven: cap output tokens for small requests (title, etc.)
+    // to avoid wasting tokens on thinking and blocking main requests
+    if (input.small && input.model.providerID === "mlx-soloheaven") {
+      maxOutputTokens = 100
+    }
 
     const tools = await resolveTools(input)
 
@@ -167,6 +191,28 @@ export namespace LLM {
           "Placeholder for LiteLLM/Anthropic proxy compatibility - required when message history contains tool calls but no active tools are needed",
         inputSchema: jsonSchema({ type: "object", properties: {} }),
         execute: async () => ({ output: "", title: "", metadata: {} }),
+      })
+    }
+
+    // soloheaven: log request composition for cache debugging
+    if (input.model.providerID === "mlx-soloheaven") {
+      const allMsgs = [
+        ...system.map((x) => ({ role: "system", len: x.length })),
+        ...input.messages.map((m) => ({
+          role: m.role,
+          len: typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length,
+        })),
+      ]
+      l.info("soloheaven request", {
+        cacheSessionID,
+        totalMessages: allMsgs.length,
+        systemMessages: allMsgs.filter((m) => m.role === "system").length,
+        userMessages: allMsgs.filter((m) => m.role === "user").length,
+        assistantMessages: allMsgs.filter((m) => m.role === "assistant").length,
+        toolMessages: allMsgs.filter((m) => m.role === "tool").length,
+        systemChars: allMsgs.filter((m) => m.role === "system").reduce((s, m) => s + m.len, 0),
+        totalChars: allMsgs.reduce((s, m) => s + m.len, 0),
+        toolCount: Object.keys(tools).length,
       })
     }
 
@@ -230,7 +276,25 @@ export namespace LLM {
             content: x,
           }),
         ),
-        ...input.messages,
+        ...(() => {
+          // soloheaven: inject date into every user message instead of system prompt
+          // to keep system prompt stable for KV cache reuse.
+          // Must be in ALL user messages (not just the last) so that previous messages
+          // remain identical across requests, preserving KV cache continuity.
+          if (input.model.providerID !== "mlx-soloheaven") return input.messages
+          const dateTag = `[Current date: ${new Date().toDateString()}]`
+          return input.messages.map((msg) => {
+            if (msg.role !== "user") return msg
+            if (typeof msg.content === "string") {
+              return { role: "user" as const, content: `${dateTag}\n${msg.content}` }
+            }
+            if (Array.isArray(msg.content)) {
+              const newParts = [{ type: "text" as const, text: dateTag }, ...msg.content] as typeof msg.content
+              return { role: "user" as const, content: newParts }
+            }
+            return msg
+          })
+        })(),
       ],
       model: wrapLanguageModel({
         model: language,

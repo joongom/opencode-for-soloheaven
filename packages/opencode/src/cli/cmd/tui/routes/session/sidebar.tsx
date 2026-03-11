@@ -1,16 +1,142 @@
 import { useSync } from "@tui/context/sync"
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createMemo, For, Show, Switch, Match, createSignal } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
 import { Locale } from "@/util/locale"
 import path from "path"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, ToolPart } from "@opencode-ai/sdk/v2"
 import { Global } from "@/global"
 import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
 import { TodoItem } from "../../component/todo-item"
+import { getToolSummary } from "./index"
+
+const ThinkingHistory = (props: { sessionID: string; sync: ReturnType<typeof useSync> }) => {
+  const { theme } = useTheme()
+  const messages = createMemo(() => props.sync.data.message[props.sessionID] ?? [])
+  
+  const completedThinkings = createMemo(() => {
+    const result: Array<{
+      message: AssistantMessage
+      reasoning: any
+      tools: ToolPart[]
+      duration: number
+    }> = []
+    
+    for (const msg of messages()) {
+      if (msg.role !== "assistant" || !msg.time.completed) continue
+      
+      const parts = props.sync.data.part[msg.id] ?? []
+      const reasoningPart = parts.find((p): p is any => p.type === "reasoning")
+      
+      if (!reasoningPart || !reasoningPart.time?.end) continue
+      
+      const tools = parts.filter((p): p is ToolPart => p.type === "tool")
+      const duration = reasoningPart.time.end - reasoningPart.time.start
+      
+      result.push({
+        message: msg,
+        reasoning: reasoningPart,
+        tools,
+        duration,
+      })
+    }
+    
+    return result.reverse()
+  })
+
+  const [expandedItems, setExpandedItems] = createSignal<Set<string>>(new Set())
+
+  const toggleExpand = (messageId: string) => {
+    const current = expandedItems()
+    const next = new Set(current)
+    if (next.has(messageId)) {
+      next.delete(messageId)
+    } else {
+      next.add(messageId)
+    }
+    setExpandedItems(next)
+  }
+
+  return (
+    <Show when={completedThinkings().length > 0}>
+      <box>
+        <text fg={theme.text}>
+          <b>Thinking History</b>
+        </text>
+        <box flexDirection="column" gap={1} marginTop={1}>
+          <For each={completedThinkings()}>
+            {(item) => {
+              const isExpanded = expandedItems().has(item.message.id)
+              const timestamp = new Date(item.reasoning.time.start).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+              
+              return (
+                <box
+                  flexDirection="column"
+                  border={["top"]}
+                  borderColor={theme.border}
+                  paddingTop={1}
+                  paddingBottom={1}
+                >
+                  <box
+                    flexDirection="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    onMouseDown={() => toggleExpand(item.message.id)}
+                  >
+                    <box flexDirection="row" gap={1}>
+                      <text fg={theme.textMuted}>{timestamp}</text>
+                      <text fg={theme.text}>
+                        <b>Thinking</b>
+                      </text>
+                      <text fg={theme.textMuted}>
+                        ({(item.duration / 1000).toFixed(1)}s · ~{Math.round((item.reasoning.text?.length || 0) / 4)} tokens)
+                      </text>
+                    </box>
+                    <text fg={theme.textMuted}>
+                      {isExpanded ? "▼" : "▶"}
+                    </text>
+                  </box>
+                  
+                  <Show when={isExpanded}>
+                    <box flexDirection="column" gap={1} marginTop={1}>
+                      <Show when={item.tools.length > 0}>
+                        <text fg={theme.warning}>
+                          🛠️ Tools ({item.tools.length}):
+                        </text>
+                        <For each={item.tools}>
+                          {(tool) => (
+                            <box flexDirection="row" gap={1}>
+                              <text fg={theme.textMuted}>↳</text>
+                              <text fg={theme.text} wrapMode="word">
+                                {tool.tool}: {tool.state.status}
+                              </text>
+                            </box>
+                          )}
+                        </For>
+                      </Show>
+                      
+                      <Show when={item.tools.length === 0}>
+                        <text fg={theme.textMuted}>
+                          No tool calls
+                        </text>
+                      </Show>
+                    </box>
+                  </Show>
+                </box>
+              )
+            }}
+          </For>
+        </box>
+      </box>
+    </Show>
+  )
+}
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
@@ -266,6 +392,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 </Show>
               </box>
             </Show>
+            <ThinkingHistory sessionID={props.sessionID} sync={sync} />
           </box>
         </scrollbox>
 

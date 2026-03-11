@@ -19,6 +19,26 @@ import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
 
+// soloheaven: store cache_info from SSE responses for display in TUI
+const soloheavenCacheInfo = new Map<string, {
+  cache_mode: string
+  cached_tokens: number
+  new_tokens: number
+  total_prompt_tokens: number
+}>()
+
+export function getSoloheavenCacheInfo(sessionID: string) {
+  return soloheavenCacheInfo.get(sessionID)
+}
+
+export function clearSoloheavenCacheInfo(sessionID: string) {
+  soloheavenCacheInfo.delete(sessionID)
+}
+
+export function soloheavenCacheInfoKeys() {
+  return soloheavenCacheInfo.keys()
+}
+
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
 import { createAnthropic } from "@ai-sdk/anthropic"
@@ -668,6 +688,17 @@ export namespace Provider {
         },
       }
     },
+    "mlx-soloheaven": async (input) => {
+      return {
+        autoload: true,
+        options: {
+          headers: {
+            "HTTP-Referer": "https://opencode.ai/",
+            "X-Title": "opencode",
+          },
+        },
+      }
+    },
   }
 
   export const Model = z
@@ -1226,6 +1257,59 @@ export namespace Provider {
           // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
           timeout: false,
         })
+
+        // soloheaven: intercept SSE stream to extract cache_info from usage
+        {
+          const fs2 = require("fs")
+          fs2.appendFileSync("/tmp/opencode-cache-debug.log", `[FETCH] provider=${model.providerID} status=${res.status} contentType=${res.headers.get("content-type")} hasBody=${!!res.body}\n`)
+        }
+        if (
+          model.providerID === "mlx-soloheaven" &&
+          res.body &&
+          res.headers.get("content-type")?.includes("text/event-stream")
+        ) {
+          // Extract session ID from the request body
+          let reqSessionID = ""
+          try {
+            const reqBody = JSON.parse(opts.body as string)
+            reqSessionID = reqBody.user ?? ""
+          } catch {}
+
+          const fs = require("fs")
+          fs.appendFileSync("/tmp/opencode-cache-debug.log", `[SSE intercept] sessionID=${reqSessionID} contentType=${res.headers.get("content-type")} status=${res.status}\n`)
+
+          const originalBody = res.body
+          let buffer = ""
+          const transform = new TransformStream<Uint8Array, Uint8Array>({
+            transform(chunk, controller) {
+              controller.enqueue(chunk)
+              try {
+                const text = new TextDecoder().decode(chunk)
+                buffer += text
+                // Only parse if we see cache_info to avoid overhead
+                if (buffer.includes("cache_info")) {
+                  const lines = buffer.split("\n")
+                  for (const line of lines) {
+                    if (!line.startsWith("data: ") || line === "data: [DONE]") continue
+                    try {
+                      const data = JSON.parse(line.slice(6))
+                      if (data.usage?.cache_info && reqSessionID) {
+                        fs.appendFileSync("/tmp/opencode-cache-debug.log", `[CAPTURED] sessionID=${reqSessionID} cacheInfo=${JSON.stringify(data.usage.cache_info)}\n`)
+                        soloheavenCacheInfo.set(reqSessionID, data.usage.cache_info)
+                      }
+                    } catch {}
+                  }
+                }
+              } catch {}
+            },
+          })
+
+          return new Response(originalBody.pipeThrough(transform), {
+            status: res.status,
+            statusText: res.statusText,
+            headers: res.headers,
+          })
+        }
 
         if (!chunkAbortCtl) return res
         return wrapSSE(res, chunkTimeout, chunkAbortCtl)

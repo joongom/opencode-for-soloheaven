@@ -754,6 +754,12 @@ export namespace ProviderTransform {
       result["promptCacheKey"] = input.sessionID
     }
 
+    // soloheaven protocol: pass sessionID as 'user' field for KV cache reuse
+    if (input.model.providerID === "mlx-soloheaven") {
+      result["user"] = input.sessionID
+      result["thinking"] = true
+    }
+
     if (input.model.api.npm === "@ai-sdk/google" || input.model.api.npm === "@ai-sdk/google-vertex") {
       result["thinkingConfig"] = {
         includeThoughts: true,
@@ -861,6 +867,12 @@ export namespace ProviderTransform {
       return { veniceParameters: { disableThinking: true } }
     }
 
+    // soloheaven: disable thinking for small/title requests to avoid
+    // wasting tokens and blocking the main chat request
+    if (model.providerID === "mlx-soloheaven") {
+      return { thinking: false }
+    }
+
     return {}
   }
 
@@ -899,6 +911,17 @@ export namespace ProviderTransform {
       }
 
       return result
+    }
+
+    // soloheaven: SDK uses two different keys for providerOptions:
+    // - "openai-compatible": for known fields (user, reasoningEffort, textVerbosity)
+    // - providerOptionsName (= providerID): for custom fields passed through to request body
+    // We need to provide both so that 'user' AND custom fields like 'thinking' are sent.
+    if (model.providerID === "mlx-soloheaven") {
+      return {
+        "openai-compatible": options,
+        [model.providerID]: options,
+      }
     }
 
     const key = sdkKey(model.api.npm) ?? model.providerID

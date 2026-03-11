@@ -1957,8 +1957,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
     const text = await result.text.catch((err) => log.error("failed to generate title", { error: err }))
     if (text) {
-      const cleaned = text
+      let stripped = text
+        // Case 1: <think>...</think> (with opening tag)
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+        // Case 2: ...</think> (no opening tag, soloheaven pattern)
+        .replace(/^[\s\S]*?<\/think>\s*/g, "")
+      // Case 3: thinking content without </think> (truncated by max_tokens)
+      // If nothing remains after stripping, the entire text was thinking — discard
+      stripped = stripped.replace(/<\/?think>\s*/g, "")
+      const cleaned = stripped
         .split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0)

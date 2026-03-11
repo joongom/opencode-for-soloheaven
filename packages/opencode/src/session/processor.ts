@@ -8,7 +8,7 @@ import { Bus } from "@/bus"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
-import type { Provider } from "@/provider/provider"
+import { type Provider, getSoloheavenCacheInfo, clearSoloheavenCacheInfo, soloheavenCacheInfoKeys } from "@/provider/provider"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -251,6 +251,26 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // soloheaven: retrieve cache_info captured from SSE stream
+                  const cacheInfo = (() => {
+                    if (input.model.providerID !== "mlx-soloheaven") return undefined
+                    const agentName = streamInput.agent.name === "compaction"
+                      ? (streamInput.user.agent ?? "compaction")
+                      : streamInput.agent.name
+                    const sid = `${streamInput.sessionID}:${agentName}`
+                    const fs3 = require("fs")
+                    const available = [...soloheavenCacheInfoKeys()]
+                    fs3.appendFileSync("/tmp/opencode-cache-debug.log", `[PROCESSOR] looking for sid=${sid} available=${JSON.stringify(available)}\n`)
+                    const info = getSoloheavenCacheInfo(sid)
+                    if (info) {
+                      fs3.appendFileSync("/tmp/opencode-cache-debug.log", `[PROCESSOR] FOUND sid=${sid} info=${JSON.stringify(info)}\n`)
+                      clearSoloheavenCacheInfo(sid)
+                    } else {
+                      fs3.appendFileSync("/tmp/opencode-cache-debug.log", `[PROCESSOR] NOT FOUND sid=${sid}\n`)
+                    }
+                    return info
+                  })()
+
                   await Session.updatePart({
                     id: PartID.ascending(),
                     reason: value.finishReason,
@@ -260,6 +280,7 @@ export namespace SessionProcessor {
                     type: "step-finish",
                     tokens: usage.tokens,
                     cost: usage.cost,
+                    ...(cacheInfo ? { metadata: { cacheInfo } } : {}),
                   })
                   await Session.updateMessage(input.assistantMessage)
                   if (snapshot) {

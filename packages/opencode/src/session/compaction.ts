@@ -15,6 +15,8 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "@/provider/schema"
+import { SystemPrompt } from "./system"
+import { InstructionPrompt } from "./instruction"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -200,13 +202,28 @@ When constructing the summary, try to stick to this template:
 ---`
 
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+
+    // soloheaven optimization: use the original user's agent (e.g. "build") so the
+    // system prompt matches the cached prefix exactly, maximizing KV cache reuse.
+    // Only the final user message (summarization instruction) is new.
+    const isSoloheaven = model.providerID === "mlx-soloheaven"
+    const processAgent = isSoloheaven
+      ? await Agent.get(userMessage.agent ?? "default")
+      : agent
+    const system = isSoloheaven
+      ? [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+      : []
+    const compactionPrompt = isSoloheaven
+      ? `IMPORTANT: Do not use any tools. Only output a text summary.\n\n${promptText}`
+      : promptText
+
     const result = await processor.process({
       user: userMessage,
-      agent,
+      agent: processAgent,
       abort: input.abort,
       sessionID: input.sessionID,
       tools: {},
-      system: [],
+      system,
       messages: [
         ...MessageV2.toModelMessages(messages, model, { stripMedia: true }),
         {
@@ -214,7 +231,7 @@ When constructing the summary, try to stick to this template:
           content: [
             {
               type: "text",
-              text: promptText,
+              text: compactionPrompt,
             },
           ],
         },

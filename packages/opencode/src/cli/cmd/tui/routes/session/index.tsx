@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -1049,7 +1050,7 @@ export function Session() {
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
             <Show when={showHeader() && (!sidebarVisible() || !wide())}>
-              <Header />
+              <Header sessionID={route.sessionID} />
             </Show>
             <scrollbox
               ref={(r) => (scroll = r)}
@@ -1172,22 +1173,27 @@ export function Session() {
               <Show when={permissions().length === 0 && questions().length > 0}>
                 <QuestionPrompt request={questions()[0]} />
               </Show>
-              <Prompt
-                visible={!session()?.parentID && permissions().length === 0 && questions().length === 0}
-                ref={(r) => {
-                  prompt = r
-                  promptRef.set(r)
-                  // Apply initial prompt when prompt component mounts (e.g., from fork)
-                  if (route.initialPrompt) {
-                    r.set(route.initialPrompt)
-                  }
-                }}
-                disabled={permissions().length > 0 || questions().length > 0}
-                onSubmit={() => {
-                  toBottom()
-                }}
-                sessionID={route.sessionID}
-              />
+              <Show
+                when={!session()?.parentID && permissions().length === 0 && questions().length === 0}
+                fallback={<></>}
+              >
+                <Prompt
+                  visible={!session()?.parentID && permissions().length === 0 && questions().length === 0}
+                  ref={(r) => {
+                    prompt = r
+                    promptRef.set(r)
+                    // Apply initial prompt when prompt component mounts (e.g., from fork)
+                    if (route.initialPrompt) {
+                      r.set(route.initialPrompt)
+                    }
+                  }}
+                  disabled={permissions().length > 0 || questions().length > 0}
+                  onSubmit={() => {
+                    toBottom()
+                  }}
+                  sessionID={route.sessionID}
+                />
+              </Show>
             </box>
           </Show>
           <Toast />
@@ -1385,7 +1391,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       </Show>
       <Switch>
         <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
-          <box paddingLeft={3}>
+          <box paddingLeft={3} flexDirection="column">
             <text marginTop={1}>
               <span
                 style={{
@@ -1406,6 +1412,31 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
               </Show>
             </text>
+            {(() => {
+              // soloheaven: show cache info from step-finish part
+              const cacheInfo = createMemo(() => {
+                const stepFinish = props.parts.findLast((p: any) => p.type === "step-finish" && p.metadata?.cacheInfo)
+                return (stepFinish as any)?.metadata?.cacheInfo
+              })
+              const cacheLabel = createMemo(() => {
+                const info = cacheInfo()
+                if (!info) return ""
+                const mode = info.cache_mode?.toUpperCase().replace("_", " ") ?? "UNKNOWN"
+                const isHit = mode.includes("HIT")
+                const cached = info.cached_tokens ?? 0
+                const prompt = info.total_prompt_tokens ?? 0
+                return isHit
+                  ? `KV CACHE ${mode} — ${cached.toLocaleString()} tokens reused`
+                  : `${mode} — Prompt ${prompt.toLocaleString()} tokens`
+              })
+              return (
+                <Show when={cacheLabel()}>
+                  <text fg={cacheLabel().includes("HIT") ? theme.success ?? theme.primary : theme.warning}>
+                    {cacheLabel()}
+                  </text>
+                </Show>
+              )
+            })()}
           </box>
         </Match>
       </Switch>
@@ -1427,8 +1458,31 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
     return props.part.text.replace("[REDACTED]", "").trim()
   })
+
+  const isThinking = createMemo(() => !props.part.time.end)
+  const estimatedTokens = createMemo(() => Math.round((props.part.text.length || 0) / 4))
+
+  const [elapsed, setElapsed] = createSignal(0)
+  const timer = setInterval(() => {
+    if (isThinking()) {
+      setElapsed(Date.now() - props.part.time.start)
+    }
+  }, 100)
+  onCleanup(() => clearInterval(timer))
+
+  const thinkingLabel = createMemo(() => {
+    if (isThinking()) {
+      const sec = (elapsed() / 1000).toFixed(1)
+      const tokens = estimatedTokens()
+      return `_Thinking (${sec}s · ~${tokens} tokens)..._`
+    }
+    const dur = (props.part.time.end! - props.part.time.start) / 1000
+    const tokens = estimatedTokens()
+    return `_Thinking (${dur.toFixed(1)}s · ~${tokens} tokens):_`
+  })
+
   return (
-    <Show when={content() && ctx.showThinking()}>
+    <Show when={(content() || isThinking()) && ctx.showThinking()}>
       <box
         id={"text-" + props.part.id}
         paddingLeft={2}
@@ -1443,7 +1497,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           drawUnstyledText={false}
           streaming={true}
           syntaxStyle={subtleSyntax()}
-          content={"_Thinking:_ " + content()}
+          content={thinkingLabel() + (content() ? " " + content() : "")}
           conceal={ctx.conceal()}
           fg={theme.textMuted}
         />
@@ -1454,33 +1508,119 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
 
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
-  const { theme, syntax } = useTheme()
+  const { theme, syntax, subtleSyntax } = useTheme()
+
+  // Extract thinking content and actual response.
+  // Server sends: "thinking content\n</think>\n\nactual response"
+  // (no opening <think> tag — content before </think> is the thinking)
+  const thinkContent = createMemo(() => {
+    const text = props.part.text
+    if (!text) return ""
+    // Case 1: <think>...</think> (with opening tag)
+    const fullMatch = text.match(/<think>([\s\S]*?)<\/think>/)
+    if (fullMatch) return fullMatch[1].trim()
+    // Case 2: ...</think> (no opening tag — everything before </think> is thinking)
+    const closeIdx = text.indexOf("</think>")
+    if (closeIdx !== -1) return text.slice(0, closeIdx).trim()
+    // Case 3: <think>... (opened but not closed yet)
+    const openIdx = text.indexOf("<think>")
+    if (openIdx !== -1) return text.slice(openIdx + 7).trim()
+    return ""
+  })
+
+  const isThinkingActive = createMemo(() => {
+    const text = props.part.text
+    // Still thinking if no </think> found yet and there's content
+    return text.length > 0 && !text.includes("</think>")
+  })
+
+  // Text after stripping thinking content.
+  // While thinking (no </think> yet), display nothing — thinking block handles it.
+  // After </think>, show only the response part.
+  const displayText = createMemo(() => {
+    const text = props.part.text
+    if (!text) return ""
+    const closeIdx = text.indexOf("</think>")
+    // Still thinking — don't show anything in the text block
+    if (closeIdx === -1) return ""
+    // Thinking done — show everything after </think>
+    let response = text.slice(closeIdx + 8)
+    response = response.replace(/<\/?think>\s*/g, "")
+    return response.trim()
+  })
+
+  // Elapsed time for active thinking
+  const [thinkElapsed, setThinkElapsed] = createSignal(0)
+  const thinkStart = Date.now()
+  createEffect(() => {
+    if (!isThinkingActive()) return
+    const timer = setInterval(() => setThinkElapsed(Date.now() - thinkStart), 100)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const thinkLabel = createMemo(() => {
+    const tokens = Math.round((thinkContent().length || 0) / 4)
+    const sec = (thinkElapsed() / 1000).toFixed(1)
+    if (isThinkingActive()) {
+      return `Thinking (${sec}s · ~${tokens} tokens)...`
+    }
+    if (tokens > 0) {
+      return `Thought (${sec}s · ~${tokens} tokens)`
+    }
+    return ""
+  })
+
   return (
-    <Show when={props.part.text.trim()}>
-      <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
-        <Switch>
-          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
-            <markdown
-              syntaxStyle={syntax()}
-              streaming={true}
-              content={props.part.text.trim()}
-              conceal={ctx.conceal()}
-            />
-          </Match>
-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
-            <code
-              filetype="markdown"
-              drawUnstyledText={false}
-              streaming={true}
-              syntaxStyle={syntax()}
-              content={props.part.text.trim()}
-              conceal={ctx.conceal()}
-              fg={theme.text}
-            />
-          </Match>
-        </Switch>
-      </box>
-    </Show>
+    <>
+      <Show when={thinkContent() && ctx.showThinking() && props.message.mode !== "compaction"}>
+        <box
+          paddingLeft={2}
+          marginTop={1}
+          flexDirection="column"
+          border={["left"]}
+          customBorderChars={SplitBorder.customBorderChars}
+          borderColor={theme.backgroundElement}
+        >
+          <text fg={theme.textMuted}>
+            <b>{thinkLabel()}</b>
+          </text>
+          <code
+            filetype="markdown"
+            drawUnstyledText={false}
+            streaming={isThinkingActive()}
+            syntaxStyle={subtleSyntax()}
+            content={thinkContent()}
+            conceal={ctx.conceal()}
+            fg={theme.textMuted}
+          />
+        </box>
+      </Show>
+      <Show when={displayText()}>
+        <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
+          <Switch>
+            <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+              <markdown
+                syntaxStyle={syntax()}
+                streaming={true}
+                content={displayText()}
+                conceal={ctx.conceal()}
+              />
+            </Match>
+            <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+              <code
+                filetype="markdown"
+                drawUnstyledText={false}
+                streaming={true}
+                syntaxStyle={syntax()}
+                content={displayText()}
+                conceal={ctx.conceal()}
+                fg={theme.text}
+              />
+            </Match>
+          </Switch>
+        </box>
+      </Show>
+    </>
   )
 }
 
@@ -2278,4 +2418,44 @@ function filetype(input?: string) {
   const language = LANGUAGE_EXTENSIONS[ext]
   if (["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
   return language
+}
+
+export function getToolSummary(part: ToolPart): string {
+  const input = (part.state.input || {}) as Record<string, any>
+
+  switch (part.tool) {
+    case "bash":
+      return `Bash: command="${input.command}", timeout=${input.timeout || "default"}`
+    case "read":
+      return `Read: filePath="${normalizePath(input.filePath)}", start=${input.start || 1}, end=${input.end || "end"}`
+    case "glob":
+      return `Glob: pattern="${input.pattern}", workdir="${normalizePath(input.workdir || "")}"`
+    case "grep":
+      return `Grep: pattern="${input.pattern}", path="${normalizePath(input.path || "")}"`
+    case "list":
+      return `List: path="${normalizePath(input.path || "")}", recursive=${input.recursive || false}`
+    case "write":
+      return `Write: filePath="${normalizePath(input.filePath)}", content=${(input.content || "").length} bytes`
+    case "edit":
+      const oldTextPreview = input.oldText ? input.oldText.slice(0, 100).replace(/\n/g, " ") : ""
+      return `Edit: filePath="${normalizePath(input.filePath)}", oldText="${oldTextPreview}${input.oldText && input.oldText.length > 100 ? "..." : ""}"`
+    case "apply_patch":
+      return `ApplyPatch: ${input.patch ? input.patch.split("\n").length : 0} lines in patch`
+    case "webfetch":
+      return `WebFetch: url="${input.url}"`
+    case "websearch":
+      return `WebSearch: query="${input.query}"`
+    case "codesearch":
+      return `CodeSearch: query="${input.query}", repo="${input.repo || ""}"`
+    case "task":
+      return `Task: description="${input.description}", delegate=${input.delegate || false}`
+    case "todo":
+      return `TodoWrite: ${input.todos?.length || 0} todos`
+    case "question":
+      return `Question: ${input.questions?.length || 0} questions`
+    case "skill":
+      return `Skill: name="${input.name}", description="${input.description || ""}"`
+    default:
+      return `${part.tool}: ${JSON.stringify(input)}`
+  }
 }

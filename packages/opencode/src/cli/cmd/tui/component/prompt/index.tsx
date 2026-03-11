@@ -1073,6 +1073,81 @@ export function Prompt(props: PromptProps) {
                     <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
                   </Show>
                 </box>
+                <Show when={status().type === "busy"}>
+                  {(() => {
+                    const [busyElapsed, setBusyElapsed] = createSignal(0)
+                    const busyStart = Date.now()
+                    const busyTimer = setInterval(() => setBusyElapsed(Date.now() - busyStart), 1000)
+                    onCleanup(() => clearInterval(busyTimer))
+
+                    // Track token count from current (incomplete) assistant message parts
+                    const currentParts = createMemo(() => {
+                      const msgs = sync.data.message[props.sessionID ?? ""] ?? []
+                      const lastMsg = msgs.findLast((m: any) => m.role === "assistant" && !m.time?.completed)
+                      if (!lastMsg) return []
+                      return sync.data.part[lastMsg.id] ?? []
+                    })
+                    const streamedChars = createMemo(() => {
+                      let chars = 0
+                      for (const p of currentParts()) {
+                        if (p.type === "text") chars += (p as any).text?.length ?? 0
+                        if (p.type === "reasoning") chars += (p as any).text?.length ?? 0
+                      }
+                      return chars
+                    })
+                    // Detect thinking: AI SDK reasoning parts OR <think> tags in text
+                    const thinkingState = createMemo(() => {
+                      // Check AI SDK reasoning parts
+                      const rParts = currentParts().filter((p: any) => p.type === "reasoning")
+                      if (rParts.length > 0) {
+                        const active = rParts.some((p: any) => !p.time?.end)
+                        const chars = rParts.reduce((sum: number, p: any) => sum + (p.text?.length ?? 0), 0)
+                        return { isThinking: active, thinkChars: chars }
+                      }
+                      // Check </think> in text parts (Qwen/soloheaven).
+                      // Server prefills <think> in chat template, so text arrives as:
+                      // "thinking...\n</think>\n\nresponse"
+                      for (const p of currentParts()) {
+                        if (p.type !== "text") continue
+                        const text = (p as any).text ?? ""
+                        // Empty text part = stream started but no tokens yet = still prefilling
+                        if (!text) return { isThinking: false, thinkChars: 0 }
+                        const closeIdx = text.indexOf("</think>")
+                        if (closeIdx !== -1) {
+                          // Thinking complete — content before </think>
+                          return { isThinking: false, thinkChars: closeIdx }
+                        }
+                        // Has text but no </think> yet — model is thinking
+                        return { isThinking: true, thinkChars: text.length }
+                      }
+                      return { isThinking: false, thinkChars: 0 }
+                    })
+
+                    const statusLabel = createMemo(() => {
+                      const sec = Locale.duration(busyElapsed())
+                      const ts = thinkingState()
+                      const thinkTokens = Math.round(ts.thinkChars / 4)
+                      // Non-think text chars (total minus think content)
+                      const outputChars = streamedChars() - ts.thinkChars
+                      const outputTokens = Math.round(Math.max(0, outputChars) / 4)
+
+                      if (ts.isThinking) {
+                        // No tokens yet = server processing prompt; tokens arriving = model thinking
+                        if (thinkTokens === 0) return `prefilling ${sec}`
+                        return `thinking ${sec} · ~${thinkTokens} tokens`
+                      }
+                      if (outputTokens > 0) {
+                        return `generating ${sec} · ~${outputTokens} tokens`
+                      }
+                      if (thinkTokens > 0) {
+                        return `generating ${sec}`
+                      }
+                      return `prefilling ${sec}`
+                    })
+
+                    return <text fg={theme.textMuted}>{statusLabel()}</text>
+                  })()}
+                </Show>
                 <box flexDirection="row" gap={1} flexShrink={0}>
                   {(() => {
                     const retry = createMemo(() => {

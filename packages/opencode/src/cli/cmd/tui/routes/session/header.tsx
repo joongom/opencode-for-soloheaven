@@ -1,10 +1,10 @@
-import { type Accessor, createMemo, createSignal, Match, Show, Switch } from "solid-js"
+import { type Accessor, createMemo, createSignal, createEffect, onCleanup, Match, Show, Switch, For } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { pipe, sumBy } from "remeda"
 import { useTheme } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
-import type { AssistantMessage, Session } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Session, ToolPart, TextPart } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Flag } from "@/flag/flag"
@@ -30,6 +30,134 @@ const ContextInfo = (props: { context: Accessor<string | undefined>; cost: Acces
   )
 }
 
+export const ThinkingInfo = (props: { sessionID: string; sync: ReturnType<typeof useSync> }) => {
+  const { theme } = useTheme()
+  const messages = createMemo(() => props.sync.data.message[props.sessionID] ?? [])
+
+  // Find active thinking state from either:
+  // 1. A reasoning part (AI SDK reasoning events)
+  // 2. A text part containing <think> tags (Qwen/soloheaven style)
+  const currentThinking = createMemo(() => {
+    const assistantMsg = messages().findLast((x) => x.role === "assistant" && !x.time.completed)
+    if (!assistantMsg) return undefined
+
+    const parts = props.sync.data.part[assistantMsg.id] ?? []
+
+    // Check for AI SDK reasoning part first
+    const reasoningPart = parts.find((p) => p.type === "reasoning") as any
+    if (reasoningPart && !reasoningPart.time?.end) {
+      return {
+        type: "reasoning" as const,
+        text: reasoningPart.text ?? "",
+        startTime: reasoningPart.time?.start || assistantMsg.time?.created || Date.now(),
+      }
+    }
+
+    // Check for <think> tag in text parts (Qwen/soloheaven)
+    const textPart = parts.find((p) => p.type === "text") as TextPart | undefined
+    if (textPart) {
+      const text = (textPart as any).text ?? ""
+      const thinkStart = text.indexOf("<think>")
+      if (thinkStart !== -1) {
+        const thinkEnd = text.indexOf("</think>")
+        if (thinkEnd === -1) {
+          // Still thinking — no closing tag yet
+          const thinkContent = text.slice(thinkStart + 7)
+          return {
+            type: "think-tag" as const,
+            text: thinkContent,
+            startTime: assistantMsg.time?.created || Date.now(),
+          }
+        }
+      }
+    }
+
+    return undefined
+  })
+
+  const [elapsed, setElapsed] = createSignal(0)
+  const [collapsed, setCollapsed] = createSignal(true)
+
+  createEffect(() => {
+    const thinking = currentThinking()
+    if (!thinking) return
+
+    setElapsed(Date.now() - thinking.startTime)
+    setCollapsed(false)
+
+    const timer = setInterval(() => {
+      const t = currentThinking()
+      if (t) {
+        setElapsed(Date.now() - t.startTime)
+      }
+    }, 100)
+
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const estimatedTokens = createMemo(() => {
+    const t = currentThinking()
+    return t ? Math.round((t.text.length || 0) / 4) : 0
+  })
+
+  // Preview: last 3 lines of thinking text (strip tags)
+  const thinkingPreview = createMemo(() => {
+    const t = currentThinking()
+    if (!t || !t.text.trim()) return ""
+    const clean = t.text.replace(/<\/?think>/g, "").trim()
+    if (!clean) return ""
+    const lines = clean.split("\n")
+    const preview = lines.slice(-3).join("\n")
+    return preview.length > 200 ? preview.slice(-200) : preview
+  })
+
+  return (
+    <Show when={currentThinking()}>
+      <box
+        flexShrink={0}
+        paddingLeft={2}
+        paddingRight={2}
+        backgroundColor={theme.backgroundElement}
+        border={["top"]}
+        borderColor={theme.warning}
+        flexDirection="column"
+      >
+        <box
+          flexDirection="row"
+          justifyContent="space-between"
+          onMouseDown={() => setCollapsed(!collapsed())}
+        >
+          <box flexDirection="row" gap={1}>
+            <text fg={theme.warning}>▲</text>
+            <text fg={theme.text}>
+              <b>Thinking</b>
+            </text>
+            <text fg={theme.textMuted}>
+              {(elapsed() / 1000).toFixed(1)}s · ~{estimatedTokens()} tokens
+            </text>
+          </box>
+          <text fg={theme.textMuted}>
+            {collapsed() ? "▶" : "▼"}
+          </text>
+        </box>
+
+        <Show when={!collapsed() && thinkingPreview()}>
+          <box
+            paddingLeft={2}
+            border={["left"]}
+            customBorderChars={SplitBorder.customBorderChars}
+            borderColor={theme.backgroundElement}
+          >
+            <text fg={theme.textMuted} wrapMode="word">
+              {thinkingPreview()}
+            </text>
+          </box>
+        </Show>
+      </box>
+    </Show>
+  )
+}
+
 const WorkspaceInfo = (props: { workspace: Accessor<string | undefined> }) => {
   const { theme } = useTheme()
   return (
@@ -41,7 +169,7 @@ const WorkspaceInfo = (props: { workspace: Accessor<string | undefined> }) => {
   )
 }
 
-export function Header() {
+export function Header(props: { sessionID: string }) {
   const route = useRouteData("session")
   const sync = useSync()
   const session = createMemo(() => sync.session.get(route.sessionID)!)
@@ -59,7 +187,7 @@ export function Header() {
   })
 
   const context = createMemo(() => {
-    const last = messages().findLast((x) => x.role === "assistant" && x.tokens.output > 0) as AssistantMessage
+    const last = messages().findLast((x) => x.role === "assistant" && x.tokens.output > 0) as AssistantMessage | undefined
     if (!last) return
     const total =
       last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
@@ -68,6 +196,24 @@ export function Header() {
     if (model?.limit.context) {
       result += "  " + Math.round((total / model.limit.context) * 100) + "%"
     }
+
+    // Show thinking stats: SDK reasoning tokens or <think> tag content
+    if (last.tokens.reasoning > 0) {
+      result += ` · ~${last.tokens.reasoning.toLocaleString()} reasoning`
+    } else if (last.time?.completed) {
+      // Estimate thinking tokens from <think> tag in text parts
+      const parts = sync.data.part[last.id] ?? []
+      const textPart = parts.find((p) => p.type === "text") as any
+      if (textPart?.text) {
+        const closeIdx = (textPart.text as string).indexOf("</think>")
+        if (closeIdx > 0) {
+          const thinkTokens = Math.round(closeIdx / 4)
+          const duration = last.time.completed - last.time.created
+          result += ` · ~${thinkTokens.toLocaleString()} thought (${(duration / 1000).toFixed(1)}s)`
+        }
+      }
+    }
+
     return result
   })
 
@@ -116,6 +262,7 @@ export function Header() {
                   </text>
                 )}
 
+<ThinkingInfo sessionID={route.sessionID} sync={sync} />
                 <ContextInfo context={context} cost={cost} />
               </box>
               <box flexDirection="row" gap={2}>
@@ -162,6 +309,7 @@ export function Header() {
               ) : (
                 <Title session={session} />
               )}
+              <ThinkingInfo sessionID={route.sessionID} sync={sync} />
               <ContextInfo context={context} cost={cost} />
             </box>
           </Match>

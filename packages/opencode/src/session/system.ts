@@ -31,6 +31,9 @@ export namespace SystemPrompt {
 
   export async function environment(model: Provider.Model) {
     const project = Instance.project
+    // For soloheaven, omit date from system prompt to keep it stable for KV cache.
+    // Date is injected into user messages instead (see llm.ts).
+    const isSoloheaven = model.providerID === "mlx-soloheaven"
     return [
       [
         `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
@@ -40,7 +43,7 @@ export namespace SystemPrompt {
         `  Workspace root folder: ${Instance.worktree}`,
         `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
         `  Platform: ${process.platform}`,
-        `  Today's date: ${new Date().toDateString()}`,
+        ...(isSoloheaven ? [] : [`  Today's date: ${new Date().toDateString()}`]),
         `</env>`,
         `<directories>`,
         `  ${
