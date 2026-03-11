@@ -37,19 +37,38 @@ Add to `opencode.json`:
 {
   "provider": {
     "mlx-soloheaven": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "MLX Soloheaven",
       "options": {
         "baseURL": "http://your-server:8000/v1"
+      },
+      "models": {
+        "qwen3-coder-next": {
+          "id": "Qwen3-Coder-Next-8bit",
+          "name": "Qwen3 Coder Next (8bit)",
+          "temperature": true,
+          "limit": { "context": 200000, "output": 30000 },
+          "tool_call": true,
+          "options": { "thinking": false }
+        },
+        "qwen3.5-122b": {
+          "id": "Qwen3.5-122B-A10B-8bit",
+          "name": "Qwen3.5 122B A10B (8bit)",
+          "temperature": true,
+          "limit": { "context": 200000, "output": 30000 },
+          "tool_call": true
+        },
+        "qwen3.5-9b": {
+          "id": "Qwen3.5-9B-bf16",
+          "name": "Qwen3.5 9B (bf16)",
+          "temperature": true,
+          "limit": { "context": 200000, "output": 30000 },
+          "tool_call": true
+        }
       }
     }
   },
-  "models": {
-    "qwen3-coder-next": {
-      "provider": "mlx-soloheaven",
-      "id": "Qwen3-Coder-Next-8bit",
-      "options": { "thinking": false },
-      "default": true
-    }
-  }
+  "model": "mlx-soloheaven/qwen3-coder-next"
 }
 ```
 
