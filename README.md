@@ -8,6 +8,52 @@
   </a>
 </p>
 <p align="center">The open source AI coding agent.</p>
+
+---
+
+## OpenCode for MLX-Soloheaven
+
+> Fork of [OpenCode](https://github.com/anomalyco/opencode) with modifications for the MLX-Soloheaven backend.
+
+### What is MLX-Soloheaven?
+
+MLX-Soloheaven is a local LLM serving engine built on Apple MLX that features session-based KV cache management for fast inference. This fork adapts OpenCode to maximize KV cache hit rates when using Soloheaven as the backend.
+
+### Changes from upstream
+
+- **KV Cache Session Management** — Uses the `user` field in API requests with `sessionID:agentName` format for session-based KV cache routing
+- **Stable Message History** — Disables message pruning and skipping for soloheaven to keep message indices consistent across requests, preventing cache misses
+- **Stable System Prompt** — Moves date from system prompt to user messages so the system prompt prefix remains cacheable
+- **Thinking Content Display** — Renders `<think>` content from Qwen models in a dedicated TUI block, and strips it from subsequent conversation turns
+- **KV Cache Status in TUI** — Shows cache hit/miss info on the Build footer line and in the sidebar
+- **Multi-Model Support** — Configured for Qwen3-Coder-Next, Qwen3.5-122B, Qwen3.5-9B via `opencode.json`
+- **Compaction Optimization** — Uses the original agent's system prompt during compaction to maximize cache reuse
+- **WebSearch/CodeSearch** — Enabled for soloheaven provider
+
+### Configuration
+
+Add to `opencode.json`:
+```json
+{
+  "provider": {
+    "mlx-soloheaven": {
+      "options": {
+        "baseURL": "http://your-server:8000/v1"
+      }
+    }
+  },
+  "models": {
+    "qwen3-coder-next": {
+      "provider": "mlx-soloheaven",
+      "id": "Qwen3-Coder-Next-8bit",
+      "options": { "thinking": false },
+      "default": true
+    }
+  }
+}
+```
+
+---
 <p align="center">
   <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
