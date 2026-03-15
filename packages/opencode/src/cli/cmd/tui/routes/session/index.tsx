@@ -1527,7 +1527,8 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
       const closeIdx = text.indexOf("</think>")
       if (closeIdx === -1) {
         // Still thinking - no </think> yet
-        return text.slice(openIdx + 7).trim()
+        // Return space when no content yet to signal thinking is active
+        return text.slice(openIdx + 7).trim() || " "
       }
       // Has <think> but </think> arrived separately (edge case)
       return text.slice(openIdx + 7, closeIdx).trim()
@@ -1540,9 +1541,8 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 
   const isThinkingActive = createMemo(() => {
     const text = props.part.text
-    // Only active if there's thinking content (thinkContent found tags)
-    // and </think> hasn't arrived yet
-    return thinkContent() !== "" && !text.includes("</think>")
+    // Active if <think> tag is present and </think> hasn't arrived yet
+    return text.includes("<think>") && !text.includes("</think>")
   })
 
   // Text after stripping thinking content.
