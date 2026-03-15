@@ -1426,8 +1426,11 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
                 })
                 return (
                   <Show when={cacheLabel()}>
-                    <span style={{ fg: cacheLabel().includes("HIT") ? theme.success ?? theme.primary : theme.warning }}>
-                      {" · "}{cacheLabel()}
+                    <span
+                      style={{ fg: cacheLabel().includes("HIT") ? (theme.success ?? theme.primary) : theme.warning }}
+                    >
+                      {" · "}
+                      {cacheLabel()}
                     </span>
                   </Show>
                 )
@@ -1518,12 +1521,20 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
     // Case 1: <think>...</think> (with opening tag)
     const fullMatch = text.match(/<think>([\s\S]*?)<\/think>/)
     if (fullMatch) return fullMatch[1].trim()
-    // Case 2: ...</think> (no opening tag — everything before </think> is thinking)
+    // Case 2: <think>... (opened but not closed yet) - extract content after <think>
+    const openIdx = text.indexOf("<think>")
+    if (openIdx !== -1) {
+      const closeIdx = text.indexOf("</think>")
+      if (closeIdx === -1) {
+        // Still thinking - no </think> yet
+        return text.slice(openIdx + 7).trim()
+      }
+      // Has <think> but </think> arrived separately (edge case)
+      return text.slice(openIdx + 7, closeIdx).trim()
+    }
+    // Case 3: ...</think> (no opening tag — everything before </think> is thinking)
     const closeIdx = text.indexOf("</think>")
     if (closeIdx !== -1) return text.slice(0, closeIdx).trim()
-    // Case 3: <think>... (opened but not closed yet)
-    const openIdx = text.indexOf("<think>")
-    if (openIdx !== -1) return text.slice(openIdx + 7).trim()
     return ""
   })
 
@@ -1547,8 +1558,13 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
       response = response.replace(/<\/?think>\s*/g, "")
       return response.trim()
     }
-    // No </think> — check if we're in thinking mode (has content but no tag yet)
-    if (thinkContent()) return ""
+    // No </think> — check if we're in thinking mode
+    if (thinkContent()) {
+      // Has <think> tag but no </think> yet — hide content until </think> arrives
+      const openIdx = text.indexOf("<think>")
+      if (openIdx !== -1) return ""
+      return ""
+    }
     // No thinking at all — display text as-is
     return text.trim()
   })
@@ -1603,12 +1619,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
         <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
           <Switch>
             <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
-              <markdown
-                syntaxStyle={syntax()}
-                streaming={true}
-                content={displayText()}
-                conceal={ctx.conceal()}
-              />
+              <markdown syntaxStyle={syntax()} streaming={true} content={displayText()} conceal={ctx.conceal()} />
             </Match>
             <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
               <code
